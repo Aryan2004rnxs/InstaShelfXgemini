@@ -25,6 +25,10 @@
     padding: 0;
 }
 
+.hidden:not(.modal-overlay) {
+    display: none !important;
+}
+
 body {
     font-family: var(--font-en);
     background-color: var(--bg-base);
