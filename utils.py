@@ -35,7 +35,30 @@ logger = logging.getLogger("InstaShelf")
 # DB Configuration path
 SUPABASE_DATABASE_URL = os.getenv("SUPABASE_DATABASE_URL")
 
+db_pool = None
+if SUPABASE_DATABASE_URL:
+    try:
+        from psycopg2.pool import ThreadedConnectionPool
+        # Pool size min 1, max 20 connections
+        db_pool = ThreadedConnectionPool(1, 20, SUPABASE_DATABASE_URL)
+        logger.info("Created PostgreSQL ThreadedConnectionPool")
+    except Exception as e:
+        logger.error(f"Failed to create database connection pool: {e}")
+
+class PooledConnection:
+    def __init__(self, pool):
+        self._pool = pool
+        self._conn = pool.getconn()
+    
+    def __getattr__(self, item):
+        return getattr(self._conn, item)
+    
+    def close(self):
+        self._pool.putconn(self._conn)
+
 def get_db_connection():
+    if db_pool:
+        return PooledConnection(db_pool)
     return psycopg2.connect(SUPABASE_DATABASE_URL)
 
 def init_db():

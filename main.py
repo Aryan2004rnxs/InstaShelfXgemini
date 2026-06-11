@@ -471,13 +471,13 @@ async def serve_shelf():
 async def api_get_shelf():
     """API endpoint to get all shelf items with their progress."""
     rows = await sheets.get_all_rows_sync_fallback()
-    progress_data = progress.get_all_progress()
+    progress_data = await asyncio.to_thread(progress.get_all_progress)
     return {"status": "success", "data": rows, "progress": progress_data}
 
 @app.get("/api/progress")
 async def api_get_progress():
     """API endpoint to get all user progress."""
-    progress_data = progress.get_all_progress()
+    progress_data = await asyncio.to_thread(progress.get_all_progress)
     return {"status": "success", "progress": progress_data}
 
 class ProgressUpdate(BaseModel):
@@ -488,11 +488,12 @@ class ProgressUpdate(BaseModel):
 @app.post("/api/progress")
 async def api_update_progress(update: ProgressUpdate):
     """API endpoint to update user progress for an item."""
-    success = progress.update_progress(update.content_hash, update.progress_seconds, update.is_completed)
+    success = await asyncio.to_thread(progress.update_progress, update.content_hash, update.progress_seconds, update.is_completed)
     if success:
         return {"status": "success"}
     else:
-        return {"status": "error", "message": "Failed to update progress"}, 500
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail="Failed to update progress")
 
 class NoteCreate(BaseModel):
     content_hash: str
@@ -502,16 +503,17 @@ class NoteCreate(BaseModel):
 @app.get("/api/notes/{content_hash}")
 async def api_get_notes(content_hash: str):
     """API endpoint to get all notes for a specific content item."""
-    notes = progress.get_notes(content_hash)
+    notes = await asyncio.to_thread(progress.get_notes, content_hash)
     return {"status": "success", "notes": notes}
 
 @app.post("/api/notes")
 async def api_create_note(note: NoteCreate):
     """API endpoint to create a new timestamped note."""
-    new_note = progress.add_note(note.content_hash, note.timestamp_seconds, note.note_text)
+    new_note = await asyncio.to_thread(progress.add_note, note.content_hash, note.timestamp_seconds, note.note_text)
     if new_note:
         return {"status": "success", "note": new_note}
-    return {"status": "error", "message": "Failed to create note"}, 500
+    from fastapi import HTTPException
+    raise HTTPException(status_code=500, detail="Failed to create note")
 
 class GenerateNoteRequest(BaseModel):
     title: str
@@ -519,14 +521,15 @@ class GenerateNoteRequest(BaseModel):
 @app.post("/api/notes/{content_hash}/generate")
 async def api_generate_notes_summary(content_hash: str, req: GenerateNoteRequest):
     """API endpoint to generate an AI summary from existing notes."""
-    notes = progress.get_notes(content_hash)
+    notes = await asyncio.to_thread(progress.get_notes, content_hash)
+    from fastapi import HTTPException
     if not notes:
-        return {"status": "error", "message": "No notes found"}, 400
+        raise HTTPException(status_code=400, detail="No notes found")
     
     summary = await ai_client.generate_notes_summary(req.title, notes)
     if summary:
         return {"status": "success", "summary": summary}
-    return {"status": "error", "message": "Failed to generate summary"}, 500
+    raise HTTPException(status_code=500, detail="Failed to generate summary")
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard():
