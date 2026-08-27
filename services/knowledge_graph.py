@@ -63,6 +63,11 @@ async def classify_item_with_gemini(item: Dict[str, Any]) -> str:
     if any(st in text_corpus for st in speaking_triggers):
         return "CLUST-STORYTELLING"
 
+    # Fast precision heuristic match first for instant response
+    for domain in CANONICAL_DOMAINS:
+        if any(kw in text_corpus for kw in domain["keywords"]):
+            return domain["id"]
+
     if GEMINI_KEY and len(title) > 3:
         prompt = f"""
 You are an expert AI Knowledge Cartographer. Classify the following content item into EXACTLY ONE domain ID from this list:
@@ -91,11 +96,6 @@ Return ONLY valid JSON: {{"domain_id": "CLUST-ID"}}
                 return domain_id
         except Exception as e:
             logger.debug(f"Gemini zero-shot domain classification fallback: {e}")
-
-    # Precision heuristic fallback
-    for domain in CANONICAL_DOMAINS:
-        if any(kw in text_corpus for kw in domain["keywords"]):
-            return domain["id"]
 
     return "CLUST-CULTURE"
 
@@ -144,32 +144,31 @@ async def build_dynamic_clusters_from_shelf() -> Tuple[List[Dict[str, Any]], Lis
             affected_nodes=[title]
         ))
 
-    # Filter out empty clusters and format dict output
+    # Format dict output ensuring all 5 canonical cluster hubs are always present
     result_clusters: List[Dict[str, Any]] = []
     for cat_data in clusters_map.values():
-        if cat_data["items"]:
-            cluster_media_items = []
-            for idx, raw_item in enumerate(cat_data["items"]):
-                cluster_media_items.append({
-                    "step": idx + 1,
-                    "title": raw_item.get("title", "Untitled Item"),
-                    "creator": raw_item.get("creator", "Unknown Creator"),
-                    "content_type": raw_item.get("content_type", "YOUTUBE"),
-                    "url": raw_item.get("url") or raw_item.get("instagram_url") or "#",
-                    "thumbnail_url": raw_item.get("thumbnail_url") or "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?w=800&q=80",
-                    "ai_summary": raw_item.get("ai_summary", "Curated content item."),
-                    "status": raw_item.get("status", "UNREAD"),
-                    "content_hash": raw_item.get("content_hash", "")
-                })
-
-            result_clusters.append({
-                "cluster_id": cat_data["id"],
-                "name": cat_data["name"],
-                "description": cat_data["description"],
-                "item_count": len(cluster_media_items),
-                "entities": [it["title"] for it in cluster_media_items[:5]],
-                "media_items": cluster_media_items
+        cluster_media_items = []
+        for idx, raw_item in enumerate(cat_data["items"]):
+            cluster_media_items.append({
+                "step": idx + 1,
+                "title": raw_item.get("title", "Untitled Item"),
+                "creator": raw_item.get("creator", "Unknown Creator"),
+                "content_type": raw_item.get("content_type", "YOUTUBE"),
+                "url": raw_item.get("url") or raw_item.get("instagram_url") or "#",
+                "thumbnail_url": raw_item.get("thumbnail_url") or "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?w=800&q=80",
+                "ai_summary": raw_item.get("ai_summary", "Curated content item."),
+                "status": raw_item.get("status", "UNREAD"),
+                "content_hash": raw_item.get("content_hash", "")
             })
+
+        result_clusters.append({
+            "cluster_id": cat_data["id"],
+            "name": cat_data["name"],
+            "description": cat_data["description"],
+            "item_count": len(cluster_media_items),
+            "entities": [it["title"] for it in cluster_media_items[:5]],
+            "media_items": cluster_media_items
+        })
 
     if not evolution_events:
         evolution_events.append(MapEvolutionEvent(
