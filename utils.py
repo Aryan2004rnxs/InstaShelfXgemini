@@ -262,6 +262,98 @@ def save_local_shelf_row(row_dict: dict) -> bool:
         logger.warning(f"Failed to save local shelf row: {e}")
         return False
 
+def seed_initial_shelf_items():
+    """Populates rich seed items into local database on initial launch."""
+    items = [
+        {
+            "saved_at": "2026-08-27T10:00:00",
+            "source_type": "YOUTUBE",
+            "content_type": "VIDEO",
+            "title": "Building Autonomous Agents with Google ADK & Gemini 3.5",
+            "creator": "Google DeepMind",
+            "url": "https://www.youtube.com/watch?v=upbh9dmrRRQ",
+            "thumbnail_url": "https://img.youtube.com/vi/upbh9dmrRRQ/hqdefault.jpg",
+            "confidence": 0.98,
+            "instagram_url": "",
+            "raw_context": "Deep dive into Google ADK multi-agent architecture and Gemini 3.5 Flash integration.",
+            "ai_summary": "Masterclass on building background autonomous AI agents using Google ADK, tool gateways, and Gemini 3.5 Flash reasoning.",
+            "content_hash": "SEED-ADK-001",
+            "status": "COMPLETED",
+            "gemini_notes": "Key takeaway: Google ADK decouples orchestrator logic from tool gateways, enabling multi-agent sub-delegation.",
+            "tags": "Google ADK,Gemini 3.5,Agents,Python"
+        },
+        {
+            "saved_at": "2026-08-27T11:30:00",
+            "source_type": "ARTICLE",
+            "content_type": "READING",
+            "title": "RAG Architecture & Vector Indexing Masterclass",
+            "creator": "Pinecone Labs",
+            "url": "https://www.pinecone.io/learn/vector-database/",
+            "thumbnail_url": "",
+            "confidence": 0.95,
+            "instagram_url": "",
+            "raw_context": "Comprehensive guide to dense vector embeddings, HNSW indexing, and hybrid retrieval.",
+            "ai_summary": "Covers embedding distance metrics, ANN search, and reranking strategies for low-latency RAG pipelines.",
+            "content_hash": "SEED-RAG-002",
+            "status": "IN_PROGRESS",
+            "gemini_notes": "Key takeaway: Use HNSW for sub-10ms retrieval with cosine distance on 1536-dim embeddings.",
+            "tags": "RAG,Vector Database,Embeddings,Architecture"
+        },
+        {
+            "saved_at": "2026-08-27T12:00:00",
+            "source_type": "INSTAGRAM",
+            "content_type": "REEL",
+            "title": "The Art of Storytelling in Tech & Product Design",
+            "creator": "Designcraft",
+            "url": "https://www.instagram.com/reel/C-sample1",
+            "thumbnail_url": "",
+            "confidence": 0.92,
+            "instagram_url": "https://www.instagram.com/reel/C-sample1",
+            "raw_context": "How narrative structure drives user engagement and product adoption.",
+            "ai_summary": "Breakdown of hero's journey framing in developer UI/UX and product demos.",
+            "content_hash": "SEED-STORY-003",
+            "status": "UNREAD",
+            "gemini_notes": "Key takeaway: Good UX tells a cohesive story with clear progressive disclosure.",
+            "tags": "Storytelling,UX Design,Communication"
+        },
+        {
+            "saved_at": "2026-08-27T14:15:00",
+            "source_type": "BOOK",
+            "content_type": "READING",
+            "title": "Stoicism & Engineering Discipline: Discourses of Epictetus",
+            "creator": "Epictetus",
+            "url": "https://en.wikipedia.org/wiki/Discourses_of_Epictetus",
+            "thumbnail_url": "",
+            "confidence": 0.96,
+            "instagram_url": "",
+            "raw_context": "Classical philosophy applied to focus, control, and resilience in complex engineering projects.",
+            "ai_summary": "Explores the dichotomy of control and maintaining emotional stability during technical challenges.",
+            "content_hash": "SEED-STOIC-004",
+            "status": "COMPLETED",
+            "gemini_notes": "Key takeaway: Focus strictly on what is within your direct control.",
+            "tags": "Philosophy,Stoicism,Discipline,Mindset"
+        },
+        {
+            "saved_at": "2026-08-27T16:00:00",
+            "source_type": "ARTICLE",
+            "content_type": "READING",
+            "title": "Digital Culture, Attention Economy & Algorithmic Velocity",
+            "creator": "Substack Essay",
+            "url": "https://substack.com/culture-essay",
+            "thumbnail_url": "",
+            "confidence": 0.90,
+            "instagram_url": "",
+            "raw_context": "Analysis of short-form media impact on long-form focus and knowledge retention.",
+            "ai_summary": "Discusses how modern feeds fragment attention and why curated knowledge shelves are essential.",
+            "content_hash": "SEED-CULTURE-005",
+            "status": "UNREAD",
+            "gemini_notes": "Key takeaway: Active curation counters feed-driven passive consumption.",
+            "tags": "Digital Culture,Attention,Productivity"
+        }
+    ]
+    for item in items:
+        save_local_shelf_row(item)
+
 def get_local_shelf_rows() -> List[dict]:
     """Retrieves all rows stored in local_shelf_items."""
     try:
@@ -271,7 +363,13 @@ def get_local_shelf_rows() -> List[dict]:
         cursor.execute("SELECT row_data FROM local_shelf_items ORDER BY saved_at DESC")
         rows = cursor.fetchall()
         conn.close()
-        return [json.loads(r[0]) for r in rows if r[0]]
+        
+        parsed = [json.loads(r[0]) for r in rows if r[0]]
+        if not parsed:
+            seed_initial_shelf_items()
+            return get_local_shelf_rows()
+            
+        return parsed
     except Exception as e:
         logger.warning(f"Failed to fetch local_shelf_items: {e}")
         return []
