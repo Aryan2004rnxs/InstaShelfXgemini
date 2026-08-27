@@ -5,7 +5,7 @@ from datetime import datetime
 class DiscoveredEntity(BaseModel):
     entity_id: str
     canonical_name: str
-    entity_type: str  # MOVIE, ANIME, BOOK, ARTICLE, VIDEO, PERSON, ORGANIZATION, TECHNOLOGY, CONCEPT, PRODUCT
+    entity_type: str  # MOVIE, ANIME, BOOK, ARTICLE, VIDEO, PERSON, ORGANIZATION, TECHNOLOGY, CONCEPT
     aliases: List[str] = Field(default_factory=list)
     confidence_score: float = 0.95
     external_ids: Dict[str, str] = Field(default_factory=dict)  # youtube_id, tmdb_id, isbn, doi

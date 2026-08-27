@@ -3,146 +3,322 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>InstaShelf - Japanese Aesthetic</title>
-    <!-- Google Fonts for modern Japanese typography -->
+    <title>InstaShelf — Autonomous Knowledge Cartographer</title>
+    
+    <!-- Google Fonts: Inter & Outfit for crisp executive legibility -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;700&family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
-    <!-- FontAwesome for icons -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+    
+    <!-- FontAwesome icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <!-- Marked.js for rendering AI markdown summaries -->
+    
+    <!-- Custom Modern Stylesheet -->
+    <link rel="stylesheet" href="/styles.css">
+    
+    <!-- Markdown Parser for AI Master Notes -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-    <!-- Background Elements -->
-    <div class="bg-shape bg-shape-1"></div>
-    <div class="bg-shape bg-shape-2"></div>
-
     <div class="app-container">
-        <!-- Header & Search/Filter Bar -->
-        <header class="glass-panel main-header">
-            <div class="header-content">
-                <div class="logo-area">
-                    <h1>InstaShelf <span class="jp-text">本棚</span></h1>
-                    <p>Curated Collection</p>
+        <!-- Top Navigation Header (Linear / Perplexity Style) -->
+        <header class="navbar">
+            <div class="logo-group">
+                <div class="logo-badge"><i class="fas fa-brain"></i></div>
+                <div class="logo-text">
+                    <h1>InstaShelf <span class="badge-tag badge-subtle">AGI Cartographer</span></h1>
                 </div>
-                
-                <div class="controls-area">
-                    <div class="search-box">
-                        <i class="fas fa-search"></i>
-                        <input type="text" id="searchInput" placeholder="Search title, creator, or thought...">
-                    </div>
-                    
-                    <div class="filter-box">
-                        <select id="typeFilter">
-                            <option value="ALL">All Types (すべて)</option>
-                            <option value="MOVIE_TV">Movies & Shows</option>
-                            <option value="BOOK">Books</option>
-                            <option value="YOUTUBE">YouTube Videos</option>
-                            <option value="MANGA">Manga / Manhwa</option>
-                            <option value="ANIME">Anime</option>
-                        </select>
-                    </div>
-                    
-                    <div class="filter-box">
-                        <select id="genreFilter">
-                            <option value="ALL">All Genres</option>
-                            <option value="motivational">Motivational</option>
-                            <option value="sales">Sales</option>
-                            <option value="marketing">Marketing</option>
-                            <option value="discipline">Discipline</option>
-                            <option value="finance">Finance</option>
-                            <option value="money">Money</option>
-                            <option value="mind">Mind</option>
-                            <option value="peace">Peace</option>
-                            <option value="tech">Tech</option>
-                        </select>
-                    </div>
-                    
-                    <div class="filter-box">
-                        <select id="statusFilter">
-                            <option value="ALL">All Status</option>
-                            <option value="UNREAD">Unread / Unwatched</option>
-                            <option value="COMPLETED">Completed</option>
-                        </select>
-                    </div>
-                </div>
+            </div>
+
+            <!-- Clean Centered Navigation Tabs -->
+            <nav class="nav-tabs">
+                <button class="nav-tab active" id="tabShelf"><i class="fas fa-grid-2"></i> My Shelf</button>
+                <button class="nav-tab" id="tabMission"><i class="fas fa-sitemap"></i> Knowledge Clusters</button>
+                <button class="nav-tab" id="tabDecisions"><i class="fas fa-compass"></i> Learning Path</button>
+                <button class="nav-tab" id="tabEvidence"><i class="fas fa-clock-rotate-left"></i> Timeline</button>
+            </nav>
+
+            <div class="header-actions">
+                <button class="btn btn-primary" id="openSubmitModalBtn">
+                    <i class="fas fa-plus"></i> Add Content
+                </button>
             </div>
         </header>
 
-        <!-- Main Content Grid -->
-        <main id="shelfGrid" class="shelf-grid">
-            <!-- Cards will be dynamically injected here by app.js -->
-            <div class="loading-spinner">
-                <i class="fas fa-circle-notch fa-spin"></i> Loading your shelf...
+        <!-- Command Search & Quick Input Hero -->
+        <section class="command-bar-section">
+            <div class="command-bar">
+                <i class="fas fa-link command-icon"></i>
+                <input type="url" id="quickUrlInput" placeholder="Paste any Instagram Reel, YouTube Video, Short, or Post URL to map automatically...">
+                <button class="btn btn-action" id="quickMapBtn">
+                    <i class="fas fa-sparkles"></i> Map Content
+                </button>
             </div>
-        </main>
+        </section>
+
+        <!-- MAIN VIEW 1: MY SHELF GRID (PRIMARY DEFAULT) -->
+        <div id="viewShelf" class="tab-view active-view">
+            <div class="shelf-controls">
+                <div class="search-input-wrapper">
+                    <i class="fas fa-search"></i>
+                    <input type="text" id="searchInput" placeholder="Search saved content, creators, or topics...">
+                </div>
+
+                <div class="filters-group">
+                    <select id="typeFilter" class="select-pill">
+                        <option value="ALL">All Types</option>
+                        <option value="YOUTUBE">YouTube</option>
+                        <option value="BOOK">Books</option>
+                        <option value="MOVIE_TV">Movies & Shows</option>
+                        <option value="IDEA">Ideas</option>
+                    </select>
+
+                    <select id="genreFilter" class="select-pill">
+                        <option value="ALL">All Categories</option>
+                        <option value="mind">Mindset</option>
+                        <option value="motivational">Motivation</option>
+                        <option value="tech">Tech / AI</option>
+                        <option value="finance">Finance</option>
+                    </select>
+
+                    <select id="statusFilter" class="select-pill">
+                        <option value="ALL">All Status</option>
+                        <option value="UNREAD">Unread</option>
+                        <option value="COMPLETED">Completed</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Content Grid with Prominent Thumbnails -->
+            <main id="shelfGrid" class="shelf-grid">
+                <div class="loading-state">
+                    <i class="fas fa-circle-notch fa-spin"></i> Loading saved shelf content...
+                </div>
+            </main>
+        </div>
+
+        <!-- MAIN VIEW 2: KNOWLEDGE CLUSTERS & MEDIA PATH -->
+        <div id="viewMission" class="tab-view hidden">
+            <section class="clusters-hero">
+                <div class="clusters-header-row">
+                    <div>
+                        <h2><i class="fas fa-project-diagram"></i> Category Clusters & Knowledge Network</h2>
+                        <p class="text-muted">Interactive 2D Knowledge Graph & Media Paths synthesized from your saved shelf content.</p>
+                    </div>
+                    <div class="header-right-controls">
+                        <div class="stats-summary-pills">
+                            <span class="stat-pill"><strong id="activeClustersCount">5</strong> Clusters</span>
+                            <span class="stat-pill"><strong id="totalEntitiesCount">0</strong> Categorized Items</span>
+                            <span class="stat-pill"><strong id="totalEdgesCount">0</strong> Graph Edges</span>
+                        </div>
+                        
+                        <div class="view-toggle-pills">
+                            <button class="view-toggle-btn active" id="btnGraphView"><i class="fas fa-circle-nodes"></i> Interactive Graph</button>
+                            <button class="view-toggle-btn" id="btnGridView"><i class="fas fa-grid-2"></i> Cluster Cards</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- GRAPH VIEW (CANVAS FORCE NETWORK) -->
+                <div id="graphViewContainer" class="graph-view-wrapper">
+                    <div class="graph-toolbar">
+                        <div class="graph-search-box">
+                            <i class="fas fa-search"></i>
+                            <input type="text" id="graphSearchInput" placeholder="Filter graph nodes...">
+                        </div>
+                        <div class="graph-controls-group">
+                            <button class="graph-tool-btn" id="btnZoomIn" title="Zoom In"><i class="fas fa-plus"></i></button>
+                            <button class="graph-tool-btn" id="btnZoomOut" title="Zoom Out"><i class="fas fa-minus"></i></button>
+                            <button class="graph-tool-btn" id="btnResetGraph" title="Reset View"><i class="fas fa-compress"></i></button>
+                        </div>
+                        <div class="graph-legend">
+                            <span class="legend-item"><span class="legend-dot dot-cluster"></span> Cluster Hub</span>
+                            <span class="legend-item"><span class="legend-dot dot-media"></span> Media Node</span>
+                        </div>
+                    </div>
+
+                    <div class="canvas-viewport" id="canvasViewport">
+                        <canvas id="knowledgeGraphCanvas"></canvas>
+                        <!-- Dynamic Floating Hover Tooltip -->
+                        <div id="graphTooltip" class="graph-tooltip hidden"></div>
+                    </div>
+                </div>
+
+                <!-- 2x2 Category Cluster Cards Grid (GRID VIEW) -->
+                <div id="gridViewContainer" class="cluster-cards-grid hidden">
+                    <!-- Dynamic cluster cards populated by app.js -->
+                </div>
+
+                <!-- Expanded Selected Cluster Workspace -->
+                <div id="clusterMediaWorkspace" class="cluster-workspace">
+                    <div class="workspace-top-bar">
+                        <div>
+                            <span class="badge-tag badge-purple"><i class="fas fa-route"></i> SEQUENTIAL LEARNING PATH</span>
+                            <h3 id="selectedClusterTitle">Mindset, Discipline & Self-Improvement</h3>
+                        </div>
+                        <span id="selectedClusterSub" class="text-muted">Watch / read sequentially in order below</span>
+                    </div>
+                    
+                    <div id="clusterMediaList" class="cluster-media-list">
+                        <!-- Dynamic media cards populated by app.js -->
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- MAIN VIEW 3: CONSUMPTION PATH (DAG) -->
+        <div id="viewDecisions" class="tab-view hidden">
+            <section class="path-section">
+                <div class="path-header-row">
+                    <div>
+                        <h2><i class="fas fa-diagram-nested"></i> Recommended Consumption Path (DAG)</h2>
+                        <p class="text-muted">Prerequisite-ordered learning roadmap generated by AI Cartographer dependency engine.</p>
+                    </div>
+                    <div class="stats-summary-pills">
+                        <span class="stat-pill"><i class="fas fa-clock"></i> <strong id="pathTotalTime">45</strong> min total</span>
+                        <span class="stat-pill"><i class="fas fa-layer-group"></i> <strong id="pathStepCount">5</strong> Stages</span>
+                    </div>
+                </div>
+
+                <div class="dag-controls-bar">
+                    <div class="dag-topic-wrapper">
+                        <label for="dagTopicSelect"><i class="fas fa-filter"></i> Focus Topic:</label>
+                        <select id="dagTopicSelect" class="select-pill">
+                            <option value="ALL">All Saved Topics</option>
+                            <option value="Storytelling">Storytelling & Communication</option>
+                            <option value="Philosophy">Philosophy & Literacy</option>
+                            <option value="Technology">Technology & AI</option>
+                            <option value="Mindset">Mindset & Discipline</option>
+                        </select>
+                    </div>
+
+                    <div class="dag-mode-pills">
+                        <button class="mode-pill" id="dagModeQuick"><i class="fas fa-bolt"></i> Quick (2 Steps)</button>
+                        <button class="mode-pill active" id="dagModeBalanced"><i class="fas fa-scale-balanced"></i> Balanced (4 Steps)</button>
+                        <button class="mode-pill" id="dagModeDeep"><i class="fas fa-microscope"></i> Deep Dive (6 Steps)</button>
+                    </div>
+                </div>
+
+                <!-- Interactive Visual DAG Graph Flowchart -->
+                <div class="dag-visual-flow" id="dagGraphContainer">
+                    <!-- Dynamic visual DAG nodes and neon connector arrows -->
+                </div>
+
+                <!-- Sequential Node Breakdown List -->
+                <div class="path-nodes-container" id="pathNodesList">
+                    <!-- Path nodes populated by app.js -->
+                </div>
+            </section>
+        </div>
+
+        <!-- MAIN VIEW 4: TIMELINE -->
+        <div id="viewEvidence" class="tab-view hidden">
+            <section class="timeline-section">
+                <div class="timeline-header-row">
+                    <div>
+                        <h2><i class="fas fa-timeline"></i> Knowledge Graph Evolution Timeline</h2>
+                        <p class="text-muted">Real-time chronicle of AI automated clustering events, entity resolution, and graph mutations.</p>
+                    </div>
+                    <div class="timeline-actions">
+                        <span class="stat-pill"><i class="fas fa-bolt"></i> <strong id="totalMutationsCount">0</strong> Mutations Recorded</span>
+                        <button class="btn btn-action" id="simulateMutationBtn">
+                            <i class="fas fa-wand-magic-sparkles"></i> Simulate AI Mutation
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Event Filter Pills -->
+                <div class="timeline-filters">
+                    <button class="filter-pill active" data-filter="ALL"><i class="fas fa-list"></i> All Events</button>
+                    <button class="filter-pill" data-filter="LINK"><i class="fas fa-link"></i> Node Links</button>
+                    <button class="filter-pill" data-filter="CLASSIFY"><i class="fas fa-tags"></i> AI Classifications</button>
+                    <button class="filter-pill" data-filter="MUTATION"><i class="fas fa-diagram-project"></i> Graph Mutations</button>
+                </div>
+
+                <div class="evolution-list" id="evolutionTimelineList">
+                    <!-- Timeline populated by app.js -->
+                </div>
+            </section>
+        </div>
     </div>
 
-    <div id="ytModal" class="modal-overlay hidden">
-        <div class="modal-content glass-panel modal-split">
-            <button class="close-btn" id="closeYtModal"><i class="fas fa-times"></i></button>
-            
-            <!-- Left Side: Player & Info -->
-            <div class="modal-left">
-                <div class="player-container" id="playerContainer">
-                    <div id="ytPlayer"></div>
-                </div>
-                <div class="modal-details">
+    <!-- YouTube Video Player & Notes Modal -->
+    <div id="ytModal" class="modal hidden">
+        <div class="modal-overlay"></div>
+        <div class="modal-container width-xl">
+            <div class="modal-header">
+                <div>
                     <h2 id="modalTitle">Video Title</h2>
-                    <p id="modalCreator" class="creator-text">Creator</p>
-                    <div class="progress-bar-container">
-                        <div class="progress-bar" id="modalProgressBar"></div>
-                    </div>
-                    <div class="modal-actions">
-                        <button class="action-btn primary-btn" id="markFinishedBtn">
-                            <i class="fas fa-check"></i> Mark as Finished
-                        </button>
-                        <a href="#" target="_blank" class="action-btn secondary-btn" id="openOriginalBtn">
-                            <i class="fas fa-external-link-alt"></i> Open Original
-                        </a>
-                    </div>
-                    <div id="mangaCopyInstruction" class="hidden" style="margin-top: 10px; font-size: 0.85rem; color: var(--primary); text-align: center; background: rgba(139, 92, 246, 0.1); padding: 8px; border-radius: 6px;">
-                        <i class="fas fa-info-circle"></i> Title will be auto-copied. Paste it in the Asura Scans search bar.
-                    </div>
-                    <div id="adblockWarning" class="adblock-warning hidden" style="margin-top: 15px; padding: 15px; background: rgba(255, 59, 48, 0.1); border-left: 4px solid #ff3b30; border-radius: 8px; font-size: 0.9rem;">
-                        <p style="margin: 0 0 8px 0; color: #ff3b30; font-weight: 600;"><i class="fas fa-shield-alt"></i> Recommended: Block Popup Ads</p>
-                        <p style="margin: 0 0 12px 0; line-height: 1.5; color: var(--text-color);">Since we cannot embed the movie player directly, you will be redirected to the original site. To prevent annoying popups and interruptions while watching, we highly recommend installing the free <strong>Ad Blocker</strong> extension.</p>
-                        <a href="https://chromewebstore.google.com/detail/bgnkhhnnamicmpeenaelnjfhikgbkllg?utm_source=item-share-cb" target="_blank" class="action-btn" style="background: #ff3b30; color: white; text-decoration: none; display: inline-block; padding: 8px 16px; border-radius: 6px; font-weight: 600; width: 100%; text-align: center; font-size: 0.9rem;">
-                            <i class="fas fa-download"></i> Install Ad Blocker
-                        </a>
-                    </div>
+                    <p id="modalCreator" class="text-muted">Creator Name</p>
                 </div>
+                <button class="close-btn" id="closeYtModal"><i class="fas fa-xmark"></i></button>
             </div>
-
-            <!-- Right Side: Notes Panel -->
-            <div class="modal-right notes-panel" id="notesPanel">
-                <h3><i class="fas fa-pen-nib"></i> Smart Notes</h3>
-                
-                <div class="note-input-area">
-                    <input type="text" id="newNoteInput" placeholder="Take a note at current time...">
-                    <button id="addNoteBtn" class="action-btn primary-btn"><i class="fas fa-plus"></i></button>
+            
+            <div class="modal-body modal-split">
+                <div class="player-column">
+                    <div class="video-wrapper" id="playerContainer">
+                        <div id="ytPlayer"></div>
+                    </div>
+                    <div class="item-actions">
+                        <button class="btn btn-secondary" id="markFinishedBtn"><i class="fas fa-check"></i> Mark Complete</button>
+                        <a id="openOriginalBtn" target="_blank" class="btn btn-outline"><i class="fas fa-arrow-up-right-from-square"></i> Open Source</a>
+                    </div>
                 </div>
-                
-                <div class="notes-list" id="notesList">
-                    <!-- Notes injected here -->
-                </div>
-                
-                <button id="generateSummaryBtn" class="action-btn ai-btn">
-                    <i class="fas fa-magic"></i> Generate AI Master Note
-                </button>
 
-                <!-- AI Summary Output Area -->
-                <div id="aiSummaryOutput" class="ai-summary-container hidden">
-                    <div class="ai-summary-content markdown-body" id="aiSummaryContent"></div>
+                <div class="notes-column" id="notesPanel">
+                    <h3>Smart Notes</h3>
+                    
+                    <div class="note-input-group">
+                        <input type="text" id="newNoteInput" placeholder="Take a timestamped note...">
+                        <button class="btn btn-primary" id="addNoteBtn"><i class="fas fa-plus"></i> Add Note</button>
+                    </div>
+
+                    <div class="notes-list" id="notesList"></div>
+
+                    <div class="ai-summary-box">
+                        <button class="btn btn-secondary width-full" id="generateSummaryBtn">
+                            <i class="fas fa-sparkles"></i> Generate AI Master Note
+                        </button>
+                        <div id="aiSummaryOutput" class="ai-output hidden">
+                            <h4>AI Master Study Guide:</h4>
+                            <div id="aiSummaryContent"></div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
+    <!-- Add Content Modal -->
+    <div id="submitModal" class="modal hidden">
+        <div class="modal-overlay"></div>
+        <div class="modal-container width-md">
+            <div class="modal-header">
+                <h2>Map New Content</h2>
+                <button class="close-btn" id="closeSubmitModal"><i class="fas fa-xmark"></i></button>
+            </div>
+            <form id="agentSubmitForm">
+                <div class="form-group">
+                    <label for="taskUrlInput">Content / Reel / Video URL:</label>
+                    <input type="url" id="taskUrlInput" required placeholder="https://www.youtube.com/watch?v=... or https://www.instagram.com/reel/...">
+                </div>
+                <div class="form-group">
+                    <label for="taskGoalInput">Target Goal (Optional):</label>
+                    <select id="taskGoalInput">
+                        <option value="Teach me from foundational concepts">Foundational Learning</option>
+                        <option value="Prepare me for an interview">Interview & Concept Mastery</option>
+                        <option value="Quick 60-second revision summary">Quick Summary</option>
+                    </select>
+                </div>
+                <div class="modal-footer">
+                    <button type="submit" class="btn btn-primary width-full"><i class="fas fa-paper-plane"></i> Map Content</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- YouTube IFrame API -->
     <script src="https://www.youtube.com/iframe_api"></script>
-    <script src="/static/app.js"></script>
+    <script src="/app.js"></script>
 </body>
 </html>

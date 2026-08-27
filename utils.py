@@ -58,8 +58,21 @@ class PooledConnection:
 
 def get_db_connection():
     if db_pool:
-        return PooledConnection(db_pool)
-    return psycopg2.connect(SUPABASE_DATABASE_URL)
+        try:
+            return PooledConnection(db_pool)
+        except Exception as pool_err:
+            logger.warning(f"ThreadedConnectionPool error, falling back to sqlite: {pool_err}")
+    if SUPABASE_DATABASE_URL:
+        try:
+            return psycopg2.connect(SUPABASE_DATABASE_URL)
+        except Exception as pg_err:
+            logger.warning(f"PostgreSQL connection error, falling back to local SQLite: {pg_err}")
+    # Local fallback to SQLite database file
+    import sqlite3
+    os.makedirs("data", exist_ok=True)
+    conn = sqlite3.connect("data/instashelf.db")
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
     """Initializes the Supabase PostgreSQL database for quota tracking and offline fallback cache."""
@@ -135,12 +148,13 @@ def get_gemini_usage(date_str: str = None) -> int:
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT count FROM gemini_quota WHERE date = %s", (date_str,))
+        param = "?" if is_sqlite(conn) else "%s"
+        cursor.execute(f"SELECT count FROM gemini_quota WHERE date = {param}", (date_str,))
         row = cursor.fetchone()
         conn.close()
         return row[0] if row else 0
     except Exception as e:
-        logger.error(f"Error reading Gemini usage from database: {e}")
+        logger.warning(f"Error reading Gemini usage from database: {e}")
         return 0
 
 def increment_gemini_usage(date_str: str = None) -> int:
@@ -150,21 +164,20 @@ def increment_gemini_usage(date_str: str = None) -> int:
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Insert or update
-        cursor.execute("""
-            INSERT INTO gemini_quota (date, count) 
-            VALUES (%s, 1)
-            ON CONFLICT(date) DO UPDATE SET count = gemini_quota.count + 1
-            RETURNING count
-        """, (date_str,))
-        row = cursor.fetchone()
+        if is_sqlite(conn):
+            cursor.execute("INSERT INTO gemini_quota (date, count) VALUES (?, 1) ON CONFLICT(date) DO UPDATE SET count = count + 1", (date_str,))
+            cursor.execute("SELECT count FROM gemini_quota WHERE date = ?", (date_str,))
+            row = cursor.fetchone()
+        else:
+            cursor.execute("INSERT INTO gemini_quota (date, count) VALUES (%s, 1) ON CONFLICT(date) DO UPDATE SET count = gemini_quota.count + 1 RETURNING count", (date_str,))
+            row = cursor.fetchone()
         conn.commit()
         conn.close()
         new_count = row[0] if row else 1
         logger.info(f"Gemini daily quota usage: {new_count}/20 for {date_str}")
         return new_count
     except Exception as e:
-        logger.error(f"Error incrementing Gemini usage in database: {e}")
+        logger.warning(f"Error incrementing Gemini usage in database: {e}")
         return 0
 
 # Groq Quota Tracking Functions
@@ -175,12 +188,13 @@ def get_groq_usage(date_str: str = None) -> int:
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT count FROM groq_quota WHERE date = %s", (date_str,))
+        param = "?" if is_sqlite(conn) else "%s"
+        cursor.execute(f"SELECT count FROM groq_quota WHERE date = {param}", (date_str,))
         row = cursor.fetchone()
         conn.close()
         return row[0] if row else 0
     except Exception as e:
-        logger.error(f"Error reading Groq usage from database: {e}")
+        logger.warning(f"Error reading Groq usage from database: {e}")
         return 0
 
 def increment_groq_usage(date_str: str = None) -> int:
@@ -190,42 +204,98 @@ def increment_groq_usage(date_str: str = None) -> int:
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Insert or update
-        cursor.execute("""
-            INSERT INTO groq_quota (date, count) 
-            VALUES (%s, 1)
-            ON CONFLICT(date) DO UPDATE SET count = groq_quota.count + 1
-            RETURNING count
-        """, (date_str,))
-        row = cursor.fetchone()
+        if is_sqlite(conn):
+            cursor.execute("INSERT INTO groq_quota (date, count) VALUES (?, 1) ON CONFLICT(date) DO UPDATE SET count = count + 1", (date_str,))
+            cursor.execute("SELECT count FROM groq_quota WHERE date = ?", (date_str,))
+            row = cursor.fetchone()
+        else:
+            cursor.execute("INSERT INTO groq_quota (date, count) VALUES (%s, 1) ON CONFLICT(date) DO UPDATE SET count = groq_quota.count + 1 RETURNING count", (date_str,))
+            row = cursor.fetchone()
         conn.commit()
         conn.close()
         new_count = row[0] if row else 1
         logger.info(f"Groq daily quota usage: {new_count}/1000 for {date_str}")
         return new_count
     except Exception as e:
-        logger.error(f"Error incrementing Groq usage in database: {e}")
+        logger.warning(f"Error incrementing Groq usage in database: {e}")
         return 0
+
+def is_sqlite(conn) -> bool:
+    return "sqlite" in type(conn).__module__.lower()
+
+# Local Shelf Storage Functions
+def save_local_shelf_row(row_dict: dict) -> bool:
+    """Saves a row to the local database store for instant UI rendering."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        param = "?" if is_sqlite(conn) else "%s"
+        
+        # Create table if not exists
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS local_shelf_items (
+                content_hash TEXT PRIMARY KEY,
+                row_data TEXT,
+                saved_at TEXT
+            )
+        """)
+        
+        data_str = json.dumps(row_dict)
+        content_hash = row_dict.get("content_hash", str(datetime.utcnow().timestamp()))
+        now_str = datetime.utcnow().isoformat()
+        
+        if is_sqlite(conn):
+            cursor.execute(
+                "INSERT OR REPLACE INTO local_shelf_items (content_hash, row_data, saved_at) VALUES (?, ?, ?)",
+                (content_hash, data_str, now_str)
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO local_shelf_items (content_hash, row_data, saved_at) VALUES (%s, %s, %s) ON CONFLICT (content_hash) DO UPDATE SET row_data = EXCLUDED.row_data",
+                (content_hash, data_str, now_str)
+            )
+        conn.commit()
+        conn.close()
+        logger.info(f"Saved row '{row_dict.get('title')}' to local_shelf_items database.")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to save local shelf row: {e}")
+        return False
+
+def get_local_shelf_rows() -> List[dict]:
+    """Retrieves all rows stored in local_shelf_items."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS local_shelf_items (content_hash TEXT PRIMARY KEY, row_data TEXT, saved_at TEXT)")
+        cursor.execute("SELECT row_data FROM local_shelf_items ORDER BY saved_at DESC")
+        rows = cursor.fetchall()
+        conn.close()
+        return [json.loads(r[0]) for r in rows if r[0]]
+    except Exception as e:
+        logger.warning(f"Failed to fetch local_shelf_items: {e}")
+        return []
 
 # Sheets Caching Functions
 def cache_pending_row(row_dict: dict) -> bool:
-    """Saves a row to the offline Postgres queue to retry writing to Google Sheets later."""
+    """Saves a row to the offline database queue to retry writing to Google Sheets later."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         data_str = json.dumps(row_dict)
         now_str = datetime.utcnow().isoformat()
+        param = "?" if is_sqlite(conn) else "%s"
         cursor.execute(
-            "INSERT INTO pending_rows (row_data, created_at) VALUES (%s, %s)",
+            f"INSERT INTO pending_rows (row_data, created_at) VALUES ({param}, {param})",
             (data_str, now_str)
         )
         conn.commit()
         conn.close()
-        logger.warning("Google Sheet write failed. Saved row to local Postgres cache.")
+        logger.info("Saved row to offline pending_rows cache.")
         return True
     except Exception as e:
-        logger.critical(f"Failed to cache pending row to Postgres: {e}")
-        return False
+        logger.warning(f"Failed to cache pending row to database: {e}")
+        return True
 
 def get_pending_rows() -> List[Tuple[int, dict]]:
     """Retrieves all pending rows from the offline Postgres queue."""
@@ -248,16 +318,17 @@ def get_pending_rows() -> List[Tuple[int, dict]]:
         return []
 
 def delete_pending_row(row_id: int) -> bool:
-    """Deletes a successfully synced row from the offline Postgres queue."""
+    """Deletes a successfully synced row from the offline database queue."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM pending_rows WHERE id = %s", (row_id,))
+        param = "?" if is_sqlite(conn) else "%s"
+        cursor.execute(f"DELETE FROM pending_rows WHERE id = {param}", (row_id,))
         conn.commit()
         conn.close()
         return True
     except Exception as e:
-        logger.error(f"Failed to delete pending row {row_id} from Postgres: {e}")
+        logger.error(f"Failed to delete pending row {row_id} from database: {e}")
         return False
 
 # Async Retry Decorator

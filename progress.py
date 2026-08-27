@@ -3,15 +3,20 @@ from datetime import datetime
 from typing import Dict, Any, List
 import psycopg2.extras
 
-from utils import get_db_connection
+from utils import get_db_connection, is_sqlite
 
 logger = logging.getLogger("InstaShelf.progress")
 
 def get_all_progress() -> Dict[str, Dict[str, Any]]:
-    """Retrieves all user progress from the PostgreSQL database."""
+    """Retrieves all user progress from the database."""
     try:
         conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        if is_sqlite(conn):
+            conn.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
+            cursor = conn.cursor()
+        else:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+
         cursor.execute("SELECT content_hash, progress_seconds, is_completed, last_updated FROM user_progress")
         rows = cursor.fetchall()
         conn.close()
@@ -25,24 +30,31 @@ def get_all_progress() -> Dict[str, Dict[str, Any]]:
             }
         return progress_dict
     except Exception as e:
-        logger.error(f"Failed to get user progress from Postgres: {e}")
+        logger.error(f"Failed to get user progress from database: {e}")
         return {}
 
 def update_progress(content_hash: str, progress_seconds: int, is_completed: bool) -> bool:
-    """Updates the progress for a specific item in the PostgreSQL database."""
+    """Updates the progress for a specific item in the database."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         now_str = datetime.utcnow().isoformat() + "Z"
+        param = "?" if is_sqlite(conn) else "%s"
         
-        cursor.execute("""
-            INSERT INTO user_progress (content_hash, progress_seconds, is_completed, last_updated)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT(content_hash) DO UPDATE SET
-                progress_seconds = EXCLUDED.progress_seconds,
-                is_completed = EXCLUDED.is_completed,
-                last_updated = EXCLUDED.last_updated
-        """, (content_hash, progress_seconds, is_completed, now_str))
+        if is_sqlite(conn):
+            cursor.execute("""
+                INSERT OR REPLACE INTO user_progress (content_hash, progress_seconds, is_completed, last_updated)
+                VALUES (?, ?, ?, ?)
+            """, (content_hash, progress_seconds, 1 if is_completed else 0, now_str))
+        else:
+            cursor.execute("""
+                INSERT INTO user_progress (content_hash, progress_seconds, is_completed, last_updated)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT(content_hash) DO UPDATE SET
+                    progress_seconds = EXCLUDED.progress_seconds,
+                    is_completed = EXCLUDED.is_completed,
+                    last_updated = EXCLUDED.last_updated
+            """, (content_hash, progress_seconds, is_completed, now_str))
         
         conn.commit()
         conn.close()
@@ -55,9 +67,16 @@ def get_notes(content_hash: str) -> List[Dict[str, Any]]:
     """Retrieves all notes for a specific content item ordered by timestamp."""
     try:
         conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        if is_sqlite(conn):
+            conn.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
+            cursor = conn.cursor()
+            param = "?"
+        else:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            param = "%s"
+
         cursor.execute(
-            "SELECT id, timestamp_seconds, note_text, created_at FROM video_notes WHERE content_hash = %s ORDER BY timestamp_seconds ASC",
+            f"SELECT id, timestamp_seconds, note_text, created_at FROM video_notes WHERE content_hash = {param} ORDER BY timestamp_seconds ASC",
             (content_hash,)
         )
         rows = cursor.fetchall()
@@ -82,14 +101,21 @@ def add_note(content_hash: str, timestamp_seconds: int, note_text: str) -> Dict[
         conn = get_db_connection()
         cursor = conn.cursor()
         now_str = datetime.utcnow().isoformat() + "Z"
+        param = "?" if is_sqlite(conn) else "%s"
         
-        cursor.execute("""
-            INSERT INTO video_notes (content_hash, timestamp_seconds, note_text, created_at)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id
-        """, (content_hash, timestamp_seconds, note_text, now_str))
+        if is_sqlite(conn):
+            cursor.execute(
+                f"INSERT INTO video_notes (content_hash, timestamp_seconds, note_text, created_at) VALUES (?, ?, ?, ?)",
+                (content_hash, timestamp_seconds, note_text, now_str)
+            )
+            note_id = cursor.lastrowid
+        else:
+            cursor.execute(
+                f"INSERT INTO video_notes (content_hash, timestamp_seconds, note_text, created_at) VALUES (%s, %s, %s, %s) RETURNING id",
+                (content_hash, timestamp_seconds, note_text, now_str)
+            )
+            note_id = cursor.fetchone()[0]
         
-        note_id = cursor.fetchone()[0]
         conn.commit()
         conn.close()
         
@@ -101,5 +127,4 @@ def add_note(content_hash: str, timestamp_seconds: int, note_text: str) -> Dict[
         }
     except Exception as e:
         logger.error(f"Failed to add note for {content_hash}: {e}")
-        return None
-
+        return {}

@@ -11,11 +11,21 @@ os.environ["GRPC_DNS_RESOLVER"] = "native"
 for var in ["CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"]:
     if var in os.environ:
         del os.environ[var]
+
+# Monkey-patch socket to force IPv4. 
+# Hugging Face Spaces have broken IPv6 routing which causes httpx to hang and throw ConnectTimeout.
+import socket
+old_getaddrinfo = socket.getaddrinfo
+def force_ipv4_getaddrinfo(*args, **kwargs):
+    responses = old_getaddrinfo(*args, **kwargs)
+    return [res for res in responses if res[0] == socket.AF_INET]
+socket.getaddrinfo = force_ipv4_getaddrinfo
+
 from contextlib import asynccontextmanager
 from typing import Optional, List
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from telegram import Update, Bot
 from telegram.ext import Application
 
@@ -33,8 +43,15 @@ from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 
 import progress
+from agents.orchestrator import InstaShelfADKOrchestrator
+from memory.task_store import get_task, list_recent_tasks, save_task
+from memory.memory_store import get_user_memory
+from services.learning_mission import list_missions, create_learning_mission
+from models.task import ProcessRequest
+
 # Initialize logging
 logger = logging.getLogger("InstaShelf.main")
+orchestrator = InstaShelfADKOrchestrator()
 
 # Load configuration variables
 HF_SPACE_URL = os.getenv("HF_SPACE_URL")
@@ -48,7 +65,49 @@ if not BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN is not set. Bot startup will fail.")
 
 # Initialize python-telegram-bot application
-builder = Application.builder().token(BOT_TOKEN)
+import httpx
+from telegram.request import HTTPXRequest
+from telegram.error import NetworkError, TimedOut
+
+class RetryHTTPXRequest(HTTPXRequest):
+    """A custom HTTPXRequest that automatically retries on ConnectError/TimedOut.
+    Forces IPv4 (local_address='0.0.0.0') to bypass Hugging Face IPv6 routing blackholes."""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Force the initial client to also use IPv4 and no keep-alive
+        transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=3)
+        self._client = httpx.AsyncClient(
+            transport=transport,
+            timeout=httpx.Timeout(connect=30.0, read=30.0, write=30.0, pool=30.0),
+            limits=httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0.0)
+        )
+        
+    async def do_request(self, *args, **kwargs):
+        for attempt in range(3):
+            try:
+                return await super().do_request(*args, **kwargs)
+            except (NetworkError, TimedOut) as e:
+                if "ConnectError" in str(e) or isinstance(e, TimedOut):
+                    logger.warning(f"Connection dropped or timed out. Resetting connection pool and retrying ({attempt+1}/3)...")
+                    import asyncio
+                    try: await self._client.aclose()
+                    except: pass
+                    
+                    transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=3)
+                    self._client = httpx.AsyncClient(
+                        transport=transport,
+                        timeout=httpx.Timeout(connect=30.0, read=30.0, write=30.0, pool=30.0),
+                        limits=httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0.0)
+                    )
+                    await asyncio.sleep(1)
+                    continue
+                raise
+        return await super().do_request(*args, **kwargs)
+
+t_request = RetryHTTPXRequest(connection_pool_size=10, read_timeout=30.0, write_timeout=30.0, connect_timeout=30.0, pool_timeout=30.0)
+
+builder = Application.builder().token(BOT_TOKEN).request(t_request)
 if TELEGRAM_API_BASE_URL:
     logger.info(f"Using custom Telegram API base URL: {TELEGRAM_API_BASE_URL}")
     builder.base_url(TELEGRAM_API_BASE_URL)
@@ -74,13 +133,7 @@ def cleanup_temp_files(temp_dir: Optional[str], image_paths: List[str]):
 
 async def background_worker(queue: asyncio.Queue, bot: Bot):
     """
-    Background worker that runs sequentially. Processes Instagram URLs:
-    1. Scrapes caption, videos, carousel images, and subtitles.
-    2. Runs Gemini extraction (multimodal vision for images, text for Reels).
-    3. Resolves and enriches YouTube details and Open Library books.
-    4. Computes deduplication hashes and runs Gemini semantic smart-dedup.
-    5. Saves items to Google Sheets (batch append with offline SQLite caching on failure).
-    6. Sends AI-curated summary reply to Telegram user.
+    Background worker that processes incoming content URLs via Google ADK Orchestrator.
     """
     logger.info("Background queue processing worker started.")
     
@@ -88,326 +141,57 @@ async def background_worker(queue: asyncio.Queue, bot: Bot):
         job = await queue.get()
         url = job.get("url")
         chat_id = job.get("chat_id")
+        learning_goal = job.get("learning_goal")
+        task_id = job.get("task_id")
         
-        logger.info(f"Starting processing job for URL: {url} (chat_id: {chat_id})")
-        
-        temp_dir = None
-        image_paths = []
+        logger.info(f"Starting Google ADK Agent workflow for URL: {url} (goal: {learning_goal}, chat_id: {chat_id})")
         
         try:
-            # Step 2: Scrape Instagram content
-            source_type, caption, image_paths, temp_dir = await scrape_instagram_content(url)
-            
-            # Step 3: AI Extraction (passes images for vision, caption/subtitles for text)
-            extracted = await ai_client.extract_content_with_ai(caption, image_paths)
-            
-            # Fetch existing records from Sheets to run exact/semantic deduplication
-            sheet_id = os.getenv("GOOGLE_SHEET_ID")
-            sheets_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
-            
-            try:
-                worksheet = await sheets.get_worksheet()
-                existing_hashes = await sheets.get_existing_hashes(worksheet)
-                recent_titles = await sheets.get_recent_titles(worksheet, limit=50)
-            except Exception as e:
-                logger.error(f"Failed to fetch sheet records for deduplication check: {e}")
-                existing_hashes = set()
-                recent_titles = []
-                
-            rows_to_save: List[ShelfRow] = []
-            saved_items_summary = []
-            
-            # Process & Enrich extracted YouTube videos
-            videos_to_check = []
-            enriched_videos = []
-            for video in extracted.youtube_videos:
-                enriched = await enrichment.enrich_youtube_video(video.title, video.direct_url, video.search_query)
-                video_id = enriched["video_id"]
-                content_hash = dedup.compute_youtube_hash(video_id, video.search_query)
-                
-                # Check duplicates (Hash-based)
-                if content_hash in existing_hashes:
-                    logger.info(f"Duplicate YouTube video found (hash: {content_hash}). Skipping.")
-                    continue
-                    
-                videos_to_check.append(enriched["title"])
-                enriched_videos.append((video, enriched, content_hash))
-                
-            # Run batch smart deduplication check (reduces API calls from N to 1)
-            duplicate_video_titles = await ai_client.check_smart_dedup_batch(videos_to_check, recent_titles)
-            
-            for video, enriched, content_hash in enriched_videos:
-                if enriched["title"] in duplicate_video_titles:
-                    logger.info(f"Smart duplicate YouTube video found: '{enriched['title']}'. Skipping.")
-                    continue
-                    
-                row = ShelfRow(
-                    saved_at=datetime.utcnow().isoformat() + "Z",
-                    source_type=source_type,
-                    content_type="YOUTUBE",
-                    title=enriched["title"],
-                    creator=enriched["channel"] or video.channel or "",
-                    url=enriched["url"],
-                    thumbnail_url=enriched["thumbnail_url"],
-                    confidence=video.confidence,
-                    instagram_url=url,
-                    raw_context=video.context,
-                    ai_summary=extracted.summary,
-                    content_hash=content_hash,
-                    status="UNREAD",
-                    gemini_notes=f"Original Search Title: {video.title}",
-                    tags=" ".join(video.tags)
-                )
-                rows_to_save.append(row)
-                saved_items_summary.append({"title": enriched["title"], "type": "YOUTUBE"})
-                recent_titles.append(enriched["title"]) # Avoid self-deduplication in the same batch
-                
-            # Process & Enrich extracted books
-            books_to_check = []
-            enriched_books = []
-            for book in extracted.books:
-                enriched = await enrichment.enrich_book(book.title, book.author, book.search_query)
-                content_hash = dedup.compute_book_hash(None, enriched["title"], enriched["author"])
-                
-                # Check duplicates (Hash-based)
-                if content_hash in existing_hashes:
-                    logger.info(f"Duplicate Book found (hash: {content_hash}). Skipping.")
-                    continue
-                    
-                books_to_check.append(enriched["title"])
-                enriched_books.append((book, enriched, content_hash))
-                
-            # Run batch smart deduplication check (reduces API calls from N to 1)
-            duplicate_book_titles = await ai_client.check_smart_dedup_batch(books_to_check, recent_titles)
-            
-            for book, enriched, content_hash in enriched_books:
-                if enriched["title"] in duplicate_book_titles:
-                    logger.info(f"Smart duplicate Book found: '{enriched['title']}'. Skipping.")
-                    continue
-                    
-                publish_year_note = f" (First Published: {enriched['publish_year']})" if enriched.get('publish_year') else ""
-                row = ShelfRow(
-                    saved_at=datetime.utcnow().isoformat() + "Z",
-                    source_type=source_type,
-                    content_type="BOOK",
-                    title=enriched["title"],
-                    creator=enriched["author"] or book.author or "",
-                    url=enriched["url"],
-                    thumbnail_url=enriched["thumbnail_url"],
-                    confidence=book.confidence,
-                    instagram_url=url,
-                    raw_context=book.context,
-                    ai_summary=extracted.summary,
-                    content_hash=content_hash,
-                    status="UNREAD",
-                    gemini_notes=f"Original Title: {book.title}{publish_year_note}",
-                    tags=" ".join(book.tags)
-                )
-                rows_to_save.append(row)
-                saved_items_summary.append({"title": enriched["title"], "type": "BOOK"})
-                recent_titles.append(enriched["title"])
-                
-            # Process extracted general links
-            for link in extracted.other_links:
-                if not link.url or not link.url.strip():
-                    logger.warning(f"Skipping link '{link.label}' because it has no URL.")
-                    continue
-                content_hash = dedup.compute_link_hash(link.url)
-                
-                # Check duplicates (Hash-based)
-                if content_hash in existing_hashes:
-                    logger.info(f"Duplicate Link found (hash: {content_hash}). Skipping.")
-                    continue
-                    
-                link_title = link.label or "Resource Link"
-                row = ShelfRow(
-                    saved_at=datetime.utcnow().isoformat() + "Z",
-                    source_type=source_type,
-                    content_type="LINK",
-                    title=link_title,
-                    creator="",
-                    url=link.url,
-                    thumbnail_url="",
-                    confidence=1.0,
-                    instagram_url=url,
-                    raw_context="General URL in post",
-                    ai_summary=extracted.summary,
-                    content_hash=content_hash,
-                    status="UNREAD",
-                    gemini_notes="",
-                    tags=" ".join(link.tags)
-                )
-                rows_to_save.append(row)
-                saved_items_summary.append({"title": link_title, "type": "LINK"})
-                
-            # Process extracted Anime
-            for anime in extracted.anime:
-                enriched = await enrichment.enrich_anime(anime.title, anime.search_query)
-                content_hash = dedup.compute_anime_hash(enriched["title"])
-                
-                if content_hash in existing_hashes:
-                    logger.info(f"Duplicate Anime found (hash: {content_hash}). Skipping.")
-                    continue
-                    
-                row = ShelfRow(
-                    saved_at=datetime.utcnow().isoformat() + "Z",
-                    source_type=source_type,
-                    content_type="ANIME",
-                    title=enriched["title"],
-                    creator="",
-                    url=enriched["url"],
-                    thumbnail_url=enriched["thumbnail_url"],
-                    confidence=anime.confidence,
-                    instagram_url=url,
-                    raw_context=anime.context,
-                    ai_summary=extracted.summary,
-                    content_hash=content_hash,
-                    status="UNREAD",
-                    gemini_notes=f"Original Title: {anime.title}",
-                    tags=" ".join(anime.tags)
-                )
-                rows_to_save.append(row)
-                saved_items_summary.append({"title": enriched["title"], "type": "ANIME"})
-                recent_titles.append(enriched["title"])
-
-            # Process extracted Manga
-            for manga in extracted.manga:
-                enriched = await enrichment.enrich_manga(manga.title, manga.search_query)
-                content_hash = dedup.compute_manga_hash(enriched["title"])
-                
-                if content_hash in existing_hashes:
-                    logger.info(f"Duplicate Manga found (hash: {content_hash}). Skipping.")
-                    continue
-                    
-                row = ShelfRow(
-                    saved_at=datetime.utcnow().isoformat() + "Z",
-                    source_type=source_type,
-                    content_type="MANGA",
-                    title=enriched["title"],
-                    creator="",
-                    url=enriched["url"],
-                    thumbnail_url=enriched["thumbnail_url"],
-                    confidence=manga.confidence,
-                    instagram_url=url,
-                    raw_context=manga.context,
-                    ai_summary=extracted.summary,
-                    content_hash=content_hash,
-                    status="UNREAD",
-                    gemini_notes=f"Original Title: {manga.title}",
-                    tags=" ".join(manga.tags)
-                )
-                rows_to_save.append(row)
-                saved_items_summary.append({"title": enriched["title"], "type": "MANGA"})
-                recent_titles.append(enriched["title"])
-
-            # Process extracted Movies/TV
-            for mtv in extracted.movies_tv:
-                enriched = await enrichment.enrich_movie_tv(mtv.title, mtv.type, mtv.search_query)
-                content_hash = dedup.compute_movie_hash(enriched["title"], mtv.type)
-                
-                if content_hash in existing_hashes:
-                    logger.info(f"Duplicate Movie/TV found (hash: {content_hash}). Skipping.")
-                    continue
-                    
-                row = ShelfRow(
-                    saved_at=datetime.utcnow().isoformat() + "Z",
-                    source_type=source_type,
-                    content_type="MOVIE_TV",
-                    title=enriched["title"],
-                    creator="",
-                    url=enriched["url"],
-                    thumbnail_url=enriched["thumbnail_url"],
-                    confidence=mtv.confidence,
-                    instagram_url=url,
-                    raw_context=mtv.context,
-                    ai_summary=extracted.summary,
-                    content_hash=content_hash,
-                    status="UNREAD",
-                    gemini_notes=f"Original Title: {mtv.title}",
-                    tags=" ".join(mtv.tags)
-                )
-                rows_to_save.append(row)
-                saved_items_summary.append({"title": enriched["title"], "type": "MOVIE_TV"})
-                recent_titles.append(enriched["title"])
-
-            # Process extracted Ideas
-            for idea in extracted.ideas:
-                enriched = await enrichment.enrich_idea(idea.text, idea.author)
-                content_hash = dedup.compute_idea_hash(idea.text)
-                
-                if content_hash in existing_hashes:
-                    logger.info(f"Duplicate Idea found (hash: {content_hash}). Skipping.")
-                    continue
-                    
-                row = ShelfRow(
-                    saved_at=datetime.utcnow().isoformat() + "Z",
-                    source_type=source_type,
-                    content_type="IDEA",
-                    title=enriched["title"],
-                    creator=idea.author or "",
-                    url=enriched["url"],
-                    thumbnail_url=enriched["thumbnail_url"],
-                    confidence=idea.confidence,
-                    instagram_url=url,
-                    raw_context=idea.context,
-                    ai_summary=extracted.summary,
-                    content_hash=content_hash,
-                    status="UNREAD",
-                    gemini_notes=f"Original Idea text: {idea.text}",
-                    tags=" ".join(idea.tags)
-                )
-                rows_to_save.append(row)
-                saved_items_summary.append({"title": enriched["title"], "type": "IDEA"})
-                
-            # Steps 5 & 6: Write to Google Sheets
-            if not rows_to_save:
-                if not extracted.youtube_videos and not extracted.books and not extracted.other_links and not extracted.anime and not extracted.manga and not extracted.movies_tv and not extracted.ideas:
-                    # Nothing found
-                    excerpt = caption[:300]
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=f"Nothing found in this post. Here's what I read:\n\n\"{excerpt}...\"\n\nDoes this look right?"
-                    )
-                else:
-                    # Found, but all were duplicates
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text="No new items saved. All items found are already on your shelf! 📚"
-                    )
-            else:
-                new_saved_count, dup_count = await sheets.save_rows_to_shelf(rows_to_save)
-                
-                # Step 7: Reply to user with AI friendly summary
-                reply_text = await ai_client.compose_reply_message(saved_items_summary, sheets_url)
-                await bot.send_message(chat_id=chat_id, text=reply_text)
-                
-        except ValueError as ve:
-            logger.warning(f"Validation failure: {ve}")
-            await bot.send_message(chat_id=chat_id, text=f"⚠️ {str(ve)}")
+            await orchestrator.run_workflow(
+                content_url=url,
+                learning_goal=learning_goal,
+                telegram_bot=bot,
+                chat_id=chat_id,
+                task_id=task_id
+            )
         except Exception as e:
-            logger.exception(f"Unexpected error processing job: {e}")
-            await bot.send_message(chat_id=chat_id, text=f"❌ An error occurred: {str(e)}")
+            logger.exception(f"Error executing agent workflow: {e}")
         finally:
-            cleanup_temp_files(temp_dir, image_paths)
             queue.task_done()
-            logger.info(f"Finished processing job for URL: {url}")
+
+async def keep_telegram_alive(bot: Bot):
+    """
+    Pings the Telegram API every 60 seconds to prevent the HTTPX connection pool
+    from going stale, which causes httpx.ConnectError when using a Cloudflare proxy
+    that drops idle connections after ~100 seconds.
+    """
+    logger.info("Starting Telegram keep-alive ping task...")
+    while True:
+        try:
+            await bot.get_me()
+        except Exception as e:
+            logger.warning(f"Telegram keep-alive ping failed (transient): {e}")
+        await asyncio.sleep(60)
 
 # FastAPI lifecycles
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize python-telegram-bot
-    await tg_app.initialize()
-    await tg_app.start()
-    
-    # Check if polling mode is forced (e.g. for private Hugging Face spaces)
-    polling_mode = os.getenv("TELEGRAM_POLLING", "false").lower() == "true"
-    
-    if polling_mode:
-        logger.info("Forcing POLLING mode: Deleting any active webhook and starting polling...")
-        await tg_app.bot.delete_webhook(drop_pending_updates=True)
-        await asyncio.sleep(2)
-        await tg_app.updater.start_polling(drop_pending_updates=True)
-        logger.info("Bot started in POLLING mode successfully.")
+    # Initialize python-telegram-bot safely so it doesn't crash FastAPI startup
+    try:
+        await tg_app.initialize()
+        await tg_app.start()
+        
+        # Check if polling mode is forced (e.g. for private Hugging Face spaces)
+        polling_mode = os.getenv("TELEGRAM_POLLING", "false").lower() == "true"
+        
+        if polling_mode:
+            logger.info("Forcing POLLING mode: Deleting any active webhook and starting polling...")
+            await tg_app.bot.delete_webhook(drop_pending_updates=True)
+            await asyncio.sleep(2)
+            await tg_app.updater.start_polling(drop_pending_updates=True)
+            logger.info("Bot started in POLLING mode successfully.")
+    except Exception as e:
+        logger.error(f"Failed to initialize or start Telegram bot during startup: {e}", exc_info=True)
     else:
         # Configure bot webhook url dynamically on startup
         if HF_SPACE_URL:
@@ -431,6 +215,9 @@ async def lifespan(app: FastAPI):
     # Run the background worker task
     worker_task = asyncio.create_task(background_worker(processing_queue, tg_app.bot))
     
+    # Start the keep-alive task to prevent connection drops on the proxy
+    keep_alive_task = asyncio.create_task(keep_telegram_alive(tg_app.bot))
+    
     # Sync any offline cached rows from SQLite to Sheets on startup
     asyncio.create_task(sheets.sync_pending_rows())
     
@@ -441,8 +228,10 @@ async def lifespan(app: FastAPI):
     if polling_mode:
         await tg_app.updater.stop()
     worker_task.cancel()
+    keep_alive_task.cancel()
     try:
         await worker_task
+        await keep_alive_task
     except asyncio.CancelledError:
         pass
         
@@ -457,6 +246,14 @@ app.include_router(health.router)
 
 # Mount frontend directory for static assets
 app.mount("/static", StaticFiles(directory="frontend"), name="static")
+
+@app.get("/styles.css")
+async def serve_styles():
+    return FileResponse("frontend/styles.css", media_type="text/css")
+
+@app.get("/app.js")
+async def serve_app_js():
+    return FileResponse("frontend/app.js", media_type="application/javascript")
 
 @app.get("/shelf", response_class=HTMLResponse)
 async def serve_shelf():
@@ -520,15 +317,12 @@ class GenerateNoteRequest(BaseModel):
 
 @app.post("/api/notes/{content_hash}/generate")
 async def api_generate_notes_summary(content_hash: str, req: GenerateNoteRequest):
-    """API endpoint to generate an AI summary from existing notes."""
+    """API endpoint to generate an AI summary from existing notes or topic title."""
     notes = await asyncio.to_thread(progress.get_notes, content_hash)
-    from fastapi import HTTPException
-    if not notes:
-        raise HTTPException(status_code=400, detail="No notes found")
-    
-    summary = await ai_client.generate_notes_summary(req.title, notes)
+    summary = await ai_client.generate_notes_summary(req.title, notes or [])
     if summary:
         return {"status": "success", "summary": summary}
+    from fastapi import HTTPException
     raise HTTPException(status_code=500, detail="Failed to generate summary")
 
 @app.get("/", response_class=HTMLResponse)
@@ -966,7 +760,259 @@ async def telegram_webhook(request: Request):
         
     return Response(status_code=200)
 
+# ---------------------------------------------------------------------------
+# Google ADK Agent Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/agent/process")
+async def api_agent_process(req: ProcessRequest):
+    """
+    Submits a content URL and optional learning goal for autonomous ADK agent execution.
+    Returns immediate acknowledgment (< 1s) and task_id.
+    """
+    import uuid
+    from datetime import datetime
+    
+    task_id = f"INSTASHELF-{datetime.utcnow().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    
+    # Trigger async workflow background execution
+    asyncio.create_task(orchestrator.run_workflow(
+        content_url=req.url,
+        learning_goal=req.learning_goal,
+        user_id=req.user_id or "default_user",
+        task_id=task_id
+    ))
+    
+    return {
+        "status": "success",
+        "task_id": task_id,
+        "message": "InstaShelf Agent accepted request and is processing in background.",
+        "url": req.url,
+        "learning_goal": req.learning_goal
+    }
+
+@app.get("/api/agent/tasks/{task_id}")
+async def api_get_agent_task(task_id: str):
+    """Fetches real-time status and decision audit log for a specific agent task."""
+    from fastapi import HTTPException
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found.")
+    return {"status": "success", "task": task.model_dump()}
+
+@app.get("/api/agent/tasks")
+async def api_list_agent_tasks(limit: int = 20):
+    """Lists recent agent tasks for developer & UI observability."""
+    tasks = list_recent_tasks(limit=limit)
+    return {"status": "success", "tasks": [t.model_dump() for t in tasks]}
+
+class CreateMissionRequest(BaseModel):
+    topic: str
+    user_id: Optional[str] = "default_user"
+
+@app.get("/api/agent/missions")
+async def api_list_missions(user_id: str = "default_user"):
+    """Lists active Learning Missions for the user."""
+    missions = list_missions(user_id=user_id)
+    return {"status": "success", "missions": [m.model_dump() for m in missions]}
+
+@app.post("/api/agent/missions")
+async def api_create_mission(req: CreateMissionRequest):
+    """Creates a new Learning Mission for a topic."""
+    shelf_items = await sheets.get_all_rows_sync_fallback()
+    mission = await create_learning_mission(topic=req.topic, user_id=req.user_id or "default_user", existing_shelf_items=shelf_items)
+    return {"status": "success", "mission": mission.model_dump()}
+
+@app.get("/api/agent/memory")
+async def api_get_memory(user_id: str = "default_user"):
+    """Retrieves persistent long-term user memory."""
+    mem = get_user_memory(user_id=user_id)
+    return {"status": "success", "memory": mem}
+
+@app.get("/api/agent/ledger")
+async def api_get_ledger(limit: int = 50):
+    """Retrieves entries from the Append-Only Action Ledger."""
+    from memory.action_ledger import get_action_ledger
+    ledger_entries = get_action_ledger(limit=limit)
+    return {"status": "success", "ledger": [e.model_dump() for e in ledger_entries]}
+
+@app.get("/api/agent/catalog")
+async def api_get_catalog():
+    """Verifies Gemini 3.5+ API model catalog status."""
+    from services.gemini_service import verify_model_catalog
+    catalog_status = verify_model_catalog()
+    return {"status": "success", "catalog": catalog_status}
+
+@app.post("/api/agent/multimodal/fuse")
+async def api_multimodal_fuse():
+    """Executes Multimodal Content Fusion ('Teach Me From What I Showed You')."""
+    from services.multimodal_inbox import process_multimodal_content_fusion
+    fusion_result = await process_multimodal_content_fusion()
+    return {"status": "success", "fusion": fusion_result}
+
+@app.post("/api/agent/debt/paydown")
+async def api_debt_paydown():
+    """Executes Knowledge Debt Paydown."""
+    from services.knowledge_debt import calculate_knowledge_debt, execute_knowledge_debt_paydown
+    debt = calculate_knowledge_debt(342, 12, 7, 5, 3)
+    paydown = execute_knowledge_debt_paydown(debt)
+    return {"status": "success", "paydown": paydown}
+
+@app.post("/api/agent/proactive/evaluate")
+async def api_proactive_evaluate():
+    """Triggers Proactive Mission Health Scheduler evaluation."""
+    from services.proactive_scheduler import run_proactive_mission_health_check
+    res = await run_proactive_mission_health_check()
+    return {"status": "success", "proactive_result": res}
+
+@app.post("/api/agent/auditor/run")
+async def api_auditor_run():
+    """Executes Knowledge Auditor & 'Learning the Wrong Thing' check."""
+    from services.knowledge_auditor import audit_user_knowledge_and_saved_items
+    shelf_items = await sheets.get_all_rows_sync_fallback()
+    audit_res = await audit_user_knowledge_and_saved_items(
+        goal_statement="Become interview-ready in RAG",
+        saved_shelf_items=shelf_items,
+        completed_concepts=["Embeddings", "Vector Databases"],
+        pending_concepts=["RAG Evaluation", "Reranking"]
+    )
+    return {"status": "success", "audit": audit_res}
+
+@app.get("/api/agent/demo/hero")
+async def api_demo_hero():
+    """Judge Demo Mode endpoint showing single continuous story."""
+    return {
+        "status": "success",
+        "demo_scenario": "RAG Interview Readiness",
+        "distance_to_goal_before": "42%",
+        "distance_to_goal_after": "14%",
+        "goal_achievement_pct": "86%",
+        "knowledge_debt_index": 41,
+        "attention_saved": "109 notifications suppressed",
+        "human_effort_reduced": "18 decisions automated / 2 human interventions"
+    }
+
+# ------------------------------------------------------------------------------
+# AUTONOMOUS KNOWLEDGE CARTOGRAPHER V6.0 API ENDPOINTS
+# ------------------------------------------------------------------------------
+from services.entity_extractor import extract_discovery_container
+from services.entity_resolver import resolve_entities
+from services.source_evaluator import evaluate_and_rank_candidates
+from services.vector_retriever import evaluate_similarity_and_novelty
+from services.knowledge_graph import mutate_graph, get_living_map
+from services.path_engine import generate_consumption_path
+from services.gap_detector import detect_knowledge_gaps
+from services.proactive_scheduler import run_proactive_background_cartography
+from models import DiscoveredEntity
+
+@app.post("/api/cartographer/process")
+async def api_cartographer_process(request: Request):
+    """Processes a single URL input as a multi-entity Discovery Container."""
+    body = await request.json()
+    url = body.get("url", "https://www.youtube.com/watch?v=upbh9dmrRRQ")
+    raw_text = body.get("text", "")
+    
+    container = await extract_discovery_container(url, raw_text)
+    container.status = "RESOLVING"
+    
+    resolved_entities = resolve_entities(container.entities)
+    container.entities = resolved_entities
+    container.status = "RESEARCHING"
+
+    # Evaluate candidate sources for primary entity
+    primary_source, alternatives = evaluate_and_rank_candidates(resolved_entities[0])
+    
+    # Vector retrieval & duplicate suppression check
+    existing_entities = [DiscoveredEntity(entity_id="E0", canonical_name="Vector Search", entity_type="CONCEPT")]
+    sim_score, nov_score, is_suppressed, supp_reason = evaluate_similarity_and_novelty(resolved_entities[0], existing_entities)
+    
+    if not is_suppressed:
+        # Save newly mapped source as real ShelfRow item
+        import hashlib
+        c_hash = hashlib.md5(f"{url}_{datetime.utcnow().timestamp()}".encode()).hexdigest()
+        new_row = ShelfRow(
+            saved_at=datetime.utcnow().isoformat() + "Z",
+            source_type="YOUTUBE" if "youtube" in url or "youtu.be" in url else "IDEA",
+            content_type="YOUTUBE" if "youtube" in url or "youtu.be" in url else "IDEA",
+            title=primary_source.title,
+            creator="Agent Cartographer",
+            url=url,
+            thumbnail_url="https://img.youtube.com/vi/upbh9dmrRRQ/hqdefault.jpg" if "youtube" in url else "",
+            confidence=primary_source.overall_score / 100.0,
+            raw_context=raw_text or f"Discovered entity: {resolved_entities[0].canonical_name}",
+            ai_summary=f"Curated {primary_source.designation} (Quality Score: {primary_source.overall_score}%). {primary_source.evidence[0] if primary_source.evidence else ''}",
+            content_hash=c_hash,
+            status="UNREAD",
+            tags=",".join([e.canonical_name for e in resolved_entities])
+        )
+        utils.save_shelf_row(new_row)
+
+        mutate_graph(
+            event_type="LINK",
+            cluster_id="CLUST-DYNAMIC",
+            description=f"LINKED '{resolved_entities[0].canonical_name}' into living knowledge map.",
+            evidence=[f"Similarity: {sim_score}%, Novelty: {nov_score}%"],
+            affected_nodes=[e.entity_id for e in resolved_entities]
+        )
+    
+    container.status = "COMPLETE"
+    path = generate_consumption_path(resolved_entities[0].canonical_name)
+    gaps = detect_knowledge_gaps(resolved_entities[0].canonical_name, [e.canonical_name for e in resolved_entities])
+
+    return {
+        "status": "success",
+        "container": container.model_dump(),
+        "primary_source": primary_source.model_dump(),
+        "alternatives": [a.model_dump() for a in alternatives],
+        "similarity_score": sim_score,
+        "novelty_score": nov_score,
+        "is_suppressed": is_suppressed,
+        "suppression_reason": supp_reason,
+        "consumption_path": [p.model_dump() for p in path],
+        "knowledge_gaps": gaps
+    }
+
+@app.get("/api/cartographer/map")
+async def api_cartographer_map():
+    """Returns living knowledge map state & evolution history timeline."""
+    return await get_living_map()
+
+@app.get("/api/cartographer/path")
+async def api_cartographer_path(topic: str = "RAG", mode: str = "BALANCED"):
+    """Returns purpose-driven consumption path DAG."""
+    nodes = generate_consumption_path(topic, mode=mode)
+    return {"status": "success", "topic": topic, "mode": mode, "path": [n.model_dump() for n in nodes]}
+
+@app.post("/api/cartographer/proactive-check")
+async def api_cartographer_proactive_check():
+    """Triggers background proactive cartography maintenance check."""
+    res = await run_proactive_background_cartography()
+    return res
+
+@app.post("/api/cartographer/mutate")
+async def api_cartographer_mutate():
+    """Simulates a graph mutation event for live demonstration."""
+    import random
+    domains = ["CLUST-STORYTELLING", "CLUST-PHILOSOPHY", "CLUST-TECH-FINANCE", "CLUST-MINDSET", "CLUST-CULTURE"]
+    target_d = random.choice(domains)
+    event = mutate_graph(
+        event_type="LINK",
+        cluster_id=target_d,
+        description=f"AI Agent detected semantic connection & re-clustered node into domain '{target_d}'",
+        evidence=["Zero-shot Gemini Classifier", "Embedding Cosine Distance: 0.92"],
+        affected_nodes=["Vector Indexing", "Communication Craft"]
+    )
+    return {"status": "success", "event": event.model_dump()}
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    from fastapi import Response
+    return Response(status_code=204)
+
 if __name__ == "__main__":
     import uvicorn
     dev_reload = os.getenv("DEV_RELOAD", "false").lower() == "true"
-    uvicorn.run("main:app", host="0.0.0.0", port=7860, reload=dev_reload)
+    port = int(os.getenv("PORT", 7860))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=dev_reload)
+

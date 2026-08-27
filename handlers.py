@@ -148,14 +148,34 @@ async def instagram_link_handler(update: Update, context: ContextTypes.DEFAULT_T
     instagram_url = match.group(0)
     chat_id = update.effective_chat.id
     
-    # Acknowledge immediately (< 1s)
-    await update.message.reply_text("📥 Processing... I'll update you shortly.")
+    # Extract any optional learning goal text user included in the message
+    goal_text = text.replace(instagram_url, "").strip()
+    learning_goal = goal_text if goal_text else None
     
-    # Push to asyncio queue
+    # Acknowledge immediately (< 1s) with Google ADK agent branding
+    ack_message = (
+        "🧠 *InstaShelf Agent* accepted your content.\n"
+        "I'll research original sources, organize knowledge, and build your study resource in the background.\n"
+        "You can continue with your day! 🚀"
+    )
+    
+    import telegram.error
+    for attempt in range(3):
+        try:
+            await update.message.reply_text(ack_message, parse_mode="Markdown")
+            break
+        except telegram.error.NetworkError as e:
+            logger.warning(f"NetworkError sending acknowledgment (attempt {attempt+1}): {e}")
+            await asyncio.sleep(1)
+            
     queue = context.application.bot_data.get("processing_queue")
     if queue:
-        await queue.put({"url": instagram_url, "chat_id": chat_id})
-        logger.info(f"Queued URL: {instagram_url} for chat_id: {chat_id}")
+        await queue.put({
+            "url": instagram_url,
+            "chat_id": chat_id,
+            "learning_goal": learning_goal
+        })
+        logger.info(f"Queued ADK Agent job URL: {instagram_url} for chat_id: {chat_id}")
     else:
         logger.error("Processing queue not found in bot_data.")
         await update.message.reply_text("❌ System error: processing queue is offline.")

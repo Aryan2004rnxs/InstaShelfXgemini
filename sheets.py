@@ -219,13 +219,25 @@ async def sync_pending_rows(worksheet: gspread.Worksheet = None):
 
 async def get_all_rows_sync_fallback() -> List[Dict[str, Any]]:
     """
-    Helper to pull all rows as dictionaries from the Google Sheet.
-    Used by /digest and /search.
+    Helper to pull all rows as dictionaries from Google Sheets and local database.
+    Used by /api/shelf, /digest, and /search.
     """
+    import utils
+    local_rows = utils.get_local_shelf_rows()
+    sheet_rows = []
     try:
         worksheet = await get_worksheet()
-        all_records = await asyncio.to_thread(worksheet.get_all_records)
-        return all_records
+        sheet_rows = await asyncio.to_thread(worksheet.get_all_records)
     except Exception as e:
-        logger.error(f"Failed to pull records from Google Sheets: {e}")
-        return []
+        logger.warning(f"Google Sheets fetch skipped: {e}")
+
+    # Combine records by content_hash
+    combined = {r.get("content_hash"): r for r in sheet_rows if r.get("content_hash")}
+    for r in local_rows:
+        ch = r.get("content_hash")
+        if ch and ch not in combined:
+            combined[ch] = r
+        elif ch:
+            combined[ch].update(r)
+
+    return list(combined.values())
