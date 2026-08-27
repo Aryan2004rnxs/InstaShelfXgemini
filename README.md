@@ -21,7 +21,7 @@ InstaShelf is engineered from the ground up to comply 100% with the **All Things
 | :--- | :--- | :--- | :---: |
 | **Primary Model** | **Gemini 3.5 or newer** via Gemini API / Vertex AI | Primary intelligence engine powered by `gemini-3.5-flash` for zero-shot domain classification, RAG mapping, and study guide synthesis. | ✅ **100% Compliant** |
 | **Agent Framework** | **Google ADK (Agent Development Kit)** / GenAI SDK | Orchestration core built directly on **Google ADK** (`import google.adk as adk` / [`InstaShelfADKOrchestrator`](file:///Users/aryan/Desktop/InstaShelf/agents/orchestrator.py#L32)). | ✅ **100% Compliant** |
-| **Google Cloud Infra** | At least one GCP infrastructure service (Cloud Run, Cloud SQL, Firestore) | Backend containerized and deployed on **Google Cloud Run** (`https://instashelf-xyz.a.run.app`), integrated with GCP IAM Service Accounts and Google Sheets API. | ✅ **100% Compliant** |
+| **Google Cloud Infra** | At least one GCP infrastructure service (Cloud Run, Cloud SQL, Firestore) | Backend containerized and deployed live on **Google Cloud Run** ([`https://instashelf-892592806522.us-central1.run.app`](https://instashelf-892592806522.us-central1.run.app)), integrated with GCP IAM Service Accounts and Google Sheets API. | ✅ **100% Compliant** |
 
 ---
 
