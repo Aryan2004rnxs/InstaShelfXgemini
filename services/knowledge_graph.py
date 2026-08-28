@@ -50,53 +50,36 @@ CANONICAL_DOMAINS = [
 
 async def classify_item_with_gemini(item: Dict[str, Any]) -> str:
     """
-    Uses Gemini AI zero-shot classification to categorize an item into its canonical domain ID.
-    Enforces absolute priority for Communication & Speaking items to CLUST-STORYTELLING.
+    Fast, deterministic zero-latency classifier.
+    Categorizes all Google Sheet items instantly into the 5 Canonical Clusters.
     """
-    title = str(item.get("title", "") or "")
-    creator = str(item.get("creator", "") or "")
-    summary = str(item.get("ai_summary", "") or "")
-    text_corpus = f"{title} {creator} {summary} {item.get('tags', '')}".lower()
+    title = str(item.get("title", "") or "").lower()
+    creator = str(item.get("creator", "") or "").lower()
+    summary = str(item.get("ai_summary", "") or "").lower()
+    tags = str(item.get("tags", "") or "").lower()
+    text_corpus = f"{title} {creator} {summary} {tags}"
 
-    # Direct Hard Precedence Rule: Any item about speaking, public speaking, conversation, or articulation ALWAYS belongs to STORYTELLING & COMMUNICATION
-    speaking_triggers = ["speak", "speaking", "articulate", "articulately", "public speaking", "conversation", "communication", "voice", "listen", "storytelling", "worldbuilding", "oratory"]
-    if any(st in text_corpus for st in speaking_triggers):
+    # 1. CLUST-STORYTELLING (Priority: Communication, Speaking, Public Speaking, Storytelling)
+    story_kw = ["speak", "speaking", "articulate", "articulately", "public speaking", "conversation", "communication", "voice", "listen", "storytelling", "worldbuilding", "oratory", "pitch", "copywriting", "ted"]
+    if any(kw in text_corpus for kw in story_kw):
         return "CLUST-STORYTELLING"
 
-    # Fast precision heuristic match first for instant response
-    for domain in CANONICAL_DOMAINS:
-        if any(kw in text_corpus for kw in domain["keywords"]):
-            return domain["id"]
+    # 2. CLUST-TECH-FINANCE (Technology, AI, Coding, Automation, Finance)
+    tech_kw = ["ai", "agent", "chatgpt", "n8n", "python", "code", "tech", "automation", "rag", "vector", "embedding", "finance", "money", "business", "freelancing", "income", "product", "software"]
+    if any(kw in text_corpus for kw in tech_kw):
+        return "CLUST-TECH-FINANCE"
 
-    if GEMINI_KEY and len(title) > 3:
-        prompt = f"""
-You are an expert AI Knowledge Cartographer. Classify the following content item into EXACTLY ONE domain ID from this list:
-1. CLUST-STORYTELLING (Storytelling, public speaking, speaking articulately, conversation, voice, worldbuilding, anime, narrative)
-2. CLUST-PHILOSOPHY (Philosophy, literacy, reading books, pseudo-intellectualism, intellectual thought)
-3. CLUST-TECH-FINANCE (Technology, AI, programming, finance, money, stock market, business)
-4. CLUST-MINDSET (Mindset, discipline, inner strength, resilience, confidence, overcoming overthinking/excuses)
-5. CLUST-CULTURE (Digital culture, internet sincerity, social media essays, modern society)
+    # 3. CLUST-PHILOSOPHY (Philosophy, Classical Books, Stoicism, Literature)
+    phil_kw = ["philosophy", "stoic", "stoicism", "epictetus", "marcus aurelius", "meditations", "classics", "reading", "book", "literature", "reality", "math", "vsauce", "time", "intellectual", "subtle art"]
+    if any(kw in text_corpus for kw in phil_kw):
+        return "CLUST-PHILOSOPHY"
 
-Content Item:
-Title: {title}
-Creator: {creator}
-Summary: {summary}
+    # 4. CLUST-MINDSET (Mindset, Discipline, Study, Motivation, Self-Improvement)
+    mindset_kw = ["mindset", "discipline", "study", "academic", "motivation", "confidence", "habit", "procrastinator", "emotions", "mental health", "unrecognizable", "self belief", "failure", "goals", "grit", "academic weapon"]
+    if any(kw in text_corpus for kw in mindset_kw):
+        return "CLUST-MINDSET"
 
-Return ONLY valid JSON: {{"domain_id": "CLUST-ID"}}
-"""
-        try:
-            res = await call_gemini_with_quota(
-                model_name=GEMINI_MODEL_NAME,
-                contents=[prompt],
-                json_mode=True
-            )
-            parsed = json.loads(res)
-            domain_id = parsed.get("domain_id")
-            if domain_id in [d["id"] for d in CANONICAL_DOMAINS]:
-                return domain_id
-        except Exception as e:
-            logger.debug(f"Gemini zero-shot domain classification fallback: {e}")
-
+    # 5. CLUST-CULTURE (Digital Culture, Social Media, Essays, Everything Else)
     return "CLUST-CULTURE"
 
 async def get_all_shelf_items_async() -> List[Dict[str, Any]]:
@@ -144,7 +127,7 @@ async def build_dynamic_clusters_from_shelf() -> Tuple[List[Dict[str, Any]], Lis
             affected_nodes=[title]
         ))
 
-    # Format dict output ensuring all 5 canonical cluster hubs are always present
+    # Format dict output for all 5 canonical clusters
     result_clusters: List[Dict[str, Any]] = []
     for cat_data in clusters_map.values():
         cluster_media_items = []
